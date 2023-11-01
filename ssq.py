@@ -64,9 +64,9 @@ def parse_steps_corrected(chunk):
             if type_byte == 0x01:
                 step_data[i] = (0x00, panel_byte)
 
-    print(time_offsets)
-    print(step_data)
-    print(freeze_lengths)
+    #print(time_offsets)
+    #print(step_data)
+    #print(freeze_lengths)
     return time_offsets, step_data, freeze_lengths
 
 
