@@ -29,15 +29,28 @@ def parse_tempo_changes_corrected(chunk):
         tempo_data.append(struct.unpack('<I', chunk['data'][offset+i*4:offset+i*4+4])[0])
 
     bpm_changes = []
+    stops = []
     for i in range(1, len(time_offsets)):
         delta_offset = time_offsets[i] - time_offsets[i-1]
         delta_ticks = tempo_data[i] - tempo_data[i-1]
         ticks_per_second = chunk['param2']
         measure_length = 4096
         bpm = (delta_offset / measure_length) / ((delta_ticks / ticks_per_second) / 240)
-        bpm_changes.append(bpm)
+        
+        if bpm == 0:
+            stop_length_seconds = delta_ticks / ticks_per_second
+            seconds_per_measure = 240 / bpm_changes[-1]
+            stop_length_ticks = stop_length_seconds * (1024 * 4 / seconds_per_measure)
+            #print(stop_length_ticks)
+            stop_length_ticks = round(stop_length_ticks)
+            stop_length_ticks = stop_length_ticks
+            #print(stop_length_ticks)
+            stops.append((i-1, stop_length_ticks)) 
+            bpm_changes.append(bpm_changes[-1])
+        else:
+            bpm_changes.append(bpm)
     
-    return time_offsets, bpm_changes
+    return time_offsets, bpm_changes, stops
 
 def parse_steps_corrected(chunk):
     time_offsets = []
@@ -301,13 +314,28 @@ def calculate_end_position(step_data):
     highest_offset = max([data[0] for data in step_data])
     mbt_format = offset_to_mbt_corrected(highest_offset)
     measures, beats, ticks = map(int, mbt_format.split(','))
-    measures += 3
+    measures += 5
     return f"{measures:03},01,00"
 
 def adjust_bpm_values(bpm_changes):
     if bpm_changes and bpm_changes[0] <= 0:
         bpm_changes[0] = bpm_changes[1]
     return bpm_changes
+
+def adjust_note_offsets(step_data, stop_data, stop_lengths):
+    adjusted_steps = []
+    
+    for note_offset, arrows, length in step_data:
+        total_adjustment = 0
+        for (stop_offset, _), (_, stop_length) in zip(stop_data, stop_lengths):
+            if note_offset > stop_offset:
+                total_adjustment += 0
+            else:
+                break
+        
+        adjusted_steps.append((note_offset + total_adjustment, arrows, length))
+    
+    return adjusted_steps
 
 def main():
     filepath = input("path to file: ")
@@ -340,14 +368,31 @@ def main():
         "bsp": 0x0114,
     }
     
-    bpm_offsets, bpm_changes = parse_tempo_changes_corrected(next(chunk for chunk in chunks if chunk['param1'] == 1))
+    bpm_offsets, bpm_changes, stop_length = parse_tempo_changes_corrected(next(chunk for chunk in chunks if chunk['param1'] == 1))
     bpm_changes = adjust_bpm_values(bpm_changes)
+    #print(stop_length)
+
     step_offsets, step_values, freeze_lengths = parse_steps_corrected(next(chunk for chunk in chunks if chunk['param1'] == 3 and chunk['param2'] == chart_map[chart_type]))
 
     step_arrows = [byte_to_arrows_corrected(byte_val) for byte_val in step_values]
 
-    step_data = list(zip(step_offsets, step_arrows, freeze_lengths))
+    stop_indices = [s[0] for s in stop_length]
+    adjusted_bpm_offsets = bpm_offsets.copy()
 
+    for idx in stop_indices:
+        stop_ticks = next(s[1] for s in stop_length if s[0] == idx)
+        for i in range(idx+1, len(adjusted_bpm_offsets)):
+            adjusted_bpm_offsets[i] += stop_ticks
+            
+    bpm_data = list(zip(bpm_offsets, bpm_changes))
+    step_data = list(zip(step_offsets, step_arrows, freeze_lengths))
+    stop_data = [bpm_data[i] for i in stop_indices]
+    step_data = adjust_note_offsets(step_data, stop_data, stop_length)
+
+    #print(step_data)
+    #print(stop_indices)
+    #print(bpm_data)
+    #print(stop_data)
     output_filename = os.path.basename(filepath).split('.')[0] + '-' + chart_type + '.vox'
     with open(output_filename, 'w') as file:
         file.write("//====================================\n")
@@ -363,9 +408,16 @@ def main():
         file.write("#END\n\n")
 
         file.write("#BPM INFO\n")
-        for offset, bpm in zip(bpm_offsets, bpm_changes):
+
+        for i, (offset, bpm) in enumerate(zip(adjusted_bpm_offsets, bpm_changes)):
             mbt_format = offset_to_mbt_corrected(offset)
-            file.write(f"{mbt_format}\t{bpm:8.4f}\t4\n")
+            
+            # Check if the current offset corresponds to a stop
+            if i in stop_indices:
+                file.write(f"{mbt_format}\t{bpm:8.4f}\t4-\n")  # Add the '-' after the 4
+            else:
+                file.write(f"{mbt_format}\t{bpm:8.4f}\t4\n")
+        
         file.write("#END\n\n")
 
         file.write("#TILT MODE INFO\n")
